@@ -1,1 +1,4 @@
 /.idea/
+/.vs
+/Presentation/bin/Debug/net8.0
+/Presentation/obj
