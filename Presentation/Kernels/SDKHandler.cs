@@ -983,6 +983,64 @@ namespace Presentation.Kernels
         }
 
         /// <summary>
+        /// Gets the current live view image as a Bitmap
+        /// </summary>
+        /// <returns>Current live view image or null if not available</returns>
+        public Bitmap? GetLiveViewImage()
+        {
+            if (!IsLiveViewOn || MainCamera?.Ref == IntPtr.Zero)
+                return null;
+
+            try
+            {
+                IntPtr jpgPointer;
+                IntPtr stream = IntPtr.Zero;
+                IntPtr EvfImageRef = IntPtr.Zero;
+                Bitmap? result = null;
+
+                // Create stream
+                Error = EdsCreateMemoryStream(0, out stream);
+                if (Error != EDS_ERR_OK) return null;
+
+                lock (STAThread.ExecLock)
+                {
+                    // Download current live view image
+                    uint err = EdsCreateEvfImageRef(stream, out EvfImageRef);
+                    if (err == EDS_ERR_OK) 
+                    {
+                        err = EdsDownloadEvfImage(MainCamera.Ref, EvfImageRef);
+                        if (err == EDS_ERR_OK)
+                        {
+                            // Get pointer and length
+                            Error = EdsGetPointer(stream, out jpgPointer);
+                            Error = EdsGetLength(stream, out ulong length);
+
+                            if (Error == EDS_ERR_OK && length > 0)
+                            {
+                                // Create bitmap from stream
+                                unsafe 
+                                { 
+                                    using var ums = new UnmanagedMemoryStream((byte*)jpgPointer.ToPointer(), (long)length, (long)length, FileAccess.Read);
+                                    result = new Bitmap(ums);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Cleanup
+                if (EvfImageRef != IntPtr.Zero) { EdsRelease(EvfImageRef); }
+                if (stream != IntPtr.Zero) { EdsRelease(stream); }
+
+                return result;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Downloads the live view image
         /// </summary>
         private void DownloadEvf()

@@ -1,13 +1,21 @@
 using Presentation.Kernels;
 using Presentation.Constants;
+using Presentation.SignalR.Hubs;
+using Presentation.WebSockets;
+using Presentation.Controllers;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddControllers();
 
 // Inject 1 time
 builder.Services.AddSingleton<SDKHandler>();
+builder.Services.AddSingleton<CameraWebSocketHandler>();
+
+builder.Services.AddSignalR();
+builder.Services.AddCors();
 
 var app = builder.Build();
 
@@ -15,7 +23,20 @@ app.UseSwagger();
 app.UseSwaggerUI();
 app.UseHttpsRedirection();
 
-// Global exception middleware
+app.UseCors(builder => builder
+    .AllowAnyOrigin()
+    .AllowAnyMethod()
+    .AllowAnyHeader());
+
+app.MapHub<CameraHub>("/cameraHub");
+
+app.Map("/ws", async (HttpContext context, CameraWebSocketHandler handler) =>
+{
+    await handler.HandleWebSocketAsync(context);
+});
+
+app.MapControllers();
+
 app.Use(async (context, next) =>
 {
     try
