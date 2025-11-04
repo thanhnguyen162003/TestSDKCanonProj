@@ -1,5 +1,8 @@
 using Presentation.Kernels;
 using Presentation.Constants;
+using Microsoft.Extensions.Options;
+using Presentation.Models;
+using Presentation.Services.Printing;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -8,6 +11,11 @@ builder.Services.AddSwaggerGen();
 
 // Inject 1 time
 builder.Services.AddSingleton<SDKHandler>();
+builder.Services.Configure<PrintSettings>(builder.Configuration.GetSection("Printing"));
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<PrintSettings>>().Value);
+builder.Services.AddSingleton<WindowsPrintService>();
+builder.Services.AddSingleton<IPrintService>(sp => sp.GetRequiredService<WindowsPrintService>());
+builder.Services.AddHostedService<PrintJobProcessor>();
 
 var app = builder.Build();
 
@@ -30,6 +38,24 @@ app.Use(async (context, next) =>
 });
 
 /*------------------------- Minimal API Endpoints -------------------------*/
+// Wire auto-print subscription at startup
+var sdkHandler = app.Services.GetRequiredService<SDKHandler>();
+var printSettings = app.Services.GetRequiredService<PrintSettings>();
+var printService = app.Services.GetRequiredService<IPrintService>();
+try
+{
+    System.IO.Directory.CreateDirectory(printSettings.SaveDirectory);
+    sdkHandler.ImageSaveDirectory = printSettings.SaveDirectory;
+    sdkHandler.PhotoSaved += path =>
+    {
+        if (printSettings.Enabled && printSettings.AutoPrint)
+        {
+            printService.Enqueue(path, printSettings.Copies);
+        }
+    };
+}
+catch { }
+
 
 app.MapGet("/api/cameras", (SDKHandler sdkHandler) =>
 {
@@ -51,6 +77,62 @@ app.MapGet("/api/cameras", (SDKHandler sdkHandler) =>
 })
 .WithName("GetCameras")
 .WithOpenApi();
+
+// Printing APIs
+app.MapGet("/api/printing/printers", (IPrintService svc) =>
+{
+    return Results.Ok(new { Printers = svc.ListPrinters() });
+}).WithName("ListPrinters").WithOpenApi();
+
+app.MapGet("/api/printing/settings", (IOptions<PrintSettings> options) =>
+{
+    return Results.Ok(options.Value);
+}).WithName("GetPrintSettings").WithOpenApi();
+
+app.MapPut("/api/printing/settings", (PrintSettings input, IOptionsMonitor<PrintSettings> monitor, IServiceProvider sp) =>
+{
+    // Note: For simplicity we replace the singleton settings instance
+    var field = typeof(OptionsMonitor<PrintSettings>).GetField("_currentValue", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+    if (field != null && monitor is OptionsMonitor<PrintSettings> mon)
+    {
+        field.SetValue(mon, input);
+    }
+    return Results.Ok(new { Message = "Print settings updated in-memory" });
+}).WithName("UpdatePrintSettings").WithOpenApi();
+
+app.MapPost("/api/printing/test", (IPrintService svc, IOptions<PrintSettings> opts) =>
+{
+    // Enqueue the most recent file from save directory (if any)
+    var dir = opts.Value.SaveDirectory;
+    if (!System.IO.Directory.Exists(dir)) return Results.BadRequest("Save directory does not exist");
+    var file = new DirectoryInfo(dir).GetFiles("*.jpg").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault()
+               ?? new DirectoryInfo(dir).GetFiles("*.jpeg").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+    if (file == null) return Results.BadRequest("No JPEG found to test print");
+    svc.Enqueue(file.FullName, 1);
+    return Results.Ok(new { Message = "Test print enqueued", File = file.FullName });
+}).WithName("TestPrint").WithOpenApi();
+
+app.MapGet("/api/printing/queue", (WindowsPrintService svc) =>
+{
+    var items = svc.SnapshotQueue().Select(j => new { j.ImagePath, j.Copies, j.Attempts, j.EnqueuedAt });
+    return Results.Ok(items);
+}).WithName("GetPrintQueue").WithOpenApi();
+
+app.MapPost("/api/printing/reprint", (WindowsPrintService svc, string? path, IOptions<PrintSettings> opts) =>
+{
+    var target = path;
+    if (string.IsNullOrWhiteSpace(target))
+    {
+        var dir = opts.Value.SaveDirectory;
+        if (!System.IO.Directory.Exists(dir)) return Results.BadRequest("Save directory does not exist");
+        var file = new DirectoryInfo(dir).GetFiles("*.jpg").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault()
+                   ?? new DirectoryInfo(dir).GetFiles("*.jpeg").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+        if (file == null) return Results.BadRequest("No JPEG found to reprint");
+        target = file.FullName;
+    }
+    svc.Enqueue(target, 1);
+    return Results.Ok(new { Message = "Reprint enqueued", File = target });
+}).WithName("Reprint").WithOpenApi();
 
 // Open session with a camera
 app.MapPost("/api/cameras/{cameraRef}/session", (IntPtr cameraRef, SDKHandler sdkHandler) =>

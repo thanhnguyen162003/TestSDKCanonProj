@@ -6,6 +6,7 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<PlatformTarget>x86</PlatformTarget>
+		<UseWPF>true</UseWPF>
 	</PropertyGroup>
     <ItemGroup>
         <PackageReference Include="Canon.EDSDK" Version="3.6.1" />
@@ -22,5 +23,9 @@
 		<None Update="EdsImage.dll">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
+	</ItemGroup>
+
+	<ItemGroup>
+		<FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
 	</ItemGroup>
 </Project>

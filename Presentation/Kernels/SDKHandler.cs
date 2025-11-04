@@ -134,6 +134,7 @@ namespace Presentation.Kernels
         /// If an image is downloaded, this event fires with the downloaded image.
         /// </summary>
         public event BitmapUpdate ImageDownloaded;
+        public event Action<string> PhotoSaved;
 
         #endregion
 
@@ -202,6 +203,13 @@ namespace Presentation.Kernels
                 EdsSetObjectEventHandler(MainCamera.Ref, ObjectEvent_All, SDKObjectEvent, MainCamera.Ref);
                 EdsSetPropertyEventHandler(MainCamera.Ref, PropertyEvent_All, SDKPropertyEvent, MainCamera.Ref);
                 CameraSessionOpen = true;
+                // ensure images save to host and camera has capacity
+                try
+                {
+                    SetSetting(PropID_SaveTo, (uint)EdsSaveTo.Host);
+                    SetCapacity();
+                }
+                catch { /* ignore if camera not ready yet */ }
             }
         }
 
@@ -597,6 +605,8 @@ namespace Presentation.Kernels
                 lock (STAThread.ExecLock) { DownloadData(ObjectPointer, streamRef); }
                 //release stream
                 Error = EdsRelease(streamRef);
+                // notify
+                try { PhotoSaved?.Invoke(CurrentPhoto); } catch { }
             }, true);
         }
 
