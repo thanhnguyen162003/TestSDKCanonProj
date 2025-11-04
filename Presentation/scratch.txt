@@ -1,0 +1,30 @@
+Prereqs (Windows PC)
+Install the DNP DS‑RX1HS Windows driver and test the printer in “Printers & Scanners”.
+Install Canon USB drivers (Canon EOS Utility is fine) and connect your Canon R100.
+.NET 8 SDK installed.
+Configure the app
+Edit Presentation/appsettings.json:
+Set Printing.PrinterName to the exact queue name (e.g., "DNP DS-RX1HS").
+Optionally change Printing.SaveDirectory to your desired folder.
+Leave Enabled=true, AutoPrint=true, PaperSize="4x6", Copies=1.
+Build and run (on Windows)
+Open the solution TestSDKProj.sln in Rider/VS on Windows.
+Set startup project to Presentation.
+Build and Run. The app uses WPF printing (already enabled) and targets x86 (EDSDK-compatible).
+Use the API (Swagger)
+Open Swagger UI: https://localhost:PORT/swagger
+In order:
+1) GET /api/cameras → copy the Ref for your camera.
+2) POST /api/cameras/{cameraRef}/session → open session.
+3) Optional: GET /api/printing/printers → confirm printer list includes your DNP.
+4) Optional: GET /api/printing/settings → confirm your settings.
+5) POST /api/cameras/photo → take a photo.
+The app saves the JPEG to Printing.SaveDirectory and auto-enqueues a 4x6, 1 copy print.
+6) Optional:
+GET /api/printing/queue → view pending print jobs.
+POST /api/printing/test → enqueue a test print of the most recent JPEG.
+POST /api/printing/reprint → reprint a specific file or the most recent JPEG.
+Notes
+Runs on Windows only (uses System.Printing/WPF).
+Borderless 4x6 is requested; the final result depends on driver capabilities/settings.
+Current app manages one camera session at a time. To run two cameras simultaneously, run a second app instance on another port (or extend the app for multi-camera sessions later).
