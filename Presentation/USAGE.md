@@ -32,7 +32,8 @@ Edit `Presentation/appsettings.json`:
   }
 }
 ```
-
+- PowerShell: run `Get-Printer | Select Name` to list all installed queues; copy the matching Name.
+- Command Prompt (legacy): `wmic printer get name`.
 - **PrinterName**: Set to the exact Windows printer queue name as it appears in “Printers & Scanners” (e.g., `DNP DS-RX1HS`). You may also use a UNC like `\\\\print-server\\photo-printer` if applicable. The app uses `System.Drawing.Printing.PrinterSettings.PrinterName` and will validate it.
 - **SaveDirectory**: JPEGs are downloaded here from the camera and the app auto‑enqueues prints when `AutoPrint` is true.
 
