@@ -9,7 +9,6 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Inject 1 time
 builder.Services.AddSingleton<SDKHandler>();
 builder.Services.Configure<PrintSettings>(builder.Configuration.GetSection("Printing"));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<PrintSettings>>().Value);
@@ -23,7 +22,6 @@ app.UseSwagger();
 app.UseSwaggerUI();
 app.UseHttpsRedirection();
 
-// Global exception middleware
 app.Use(async (context, next) =>
 {
     try
@@ -78,7 +76,89 @@ app.MapGet("/api/cameras", (SDKHandler sdkHandler) =>
 .WithName("GetCameras")
 .WithOpenApi();
 
-// Printing APIs
+app.MapGet("/api/cameras/diagnostics", (SDKHandler sdkHandler) =>
+{
+    try
+    {
+        var blockingProcesses = new List<string>();
+        var canonProcessNames = new[] { "EOS Utility", "CameraWindow", "Canon Camera Connect", "EOS Utility 3", "EOS Utility 4", "DPP", "Digital Photo Professional" };
+        
+        foreach (var process in System.Diagnostics.Process.GetProcesses())
+        {
+            try
+            {
+                var processName = process.ProcessName;
+                if (canonProcessNames.Any(canon => processName.Contains(canon, StringComparison.OrdinalIgnoreCase)))
+                {
+                    blockingProcesses.Add($"{processName} (PID: {process.Id})");
+                }
+            }
+            catch
+            {
+            }
+        }
+        
+        var cameraInfo = new List<object>();
+        string cameraConnectivityStatus = "Unknown";
+        
+        try
+        {
+            var cameras = sdkHandler.GetCameraList();
+            cameraConnectivityStatus = cameras.Count > 0 
+                ? $"Found {cameras.Count} connected camera(s)" 
+                : "No cameras detected";
+            
+            foreach (var camera in cameras)
+            {
+                cameraInfo.Add(new
+                {
+                    ProductName = camera.Info.szDeviceDescription,
+                    PortName = camera.Info.szPortName,
+                    Ref = camera.Ref.ToString(),
+                    DeviceSubType = camera.Info.DeviceSubType
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            cameraConnectivityStatus = $"Error checking cameras: {ex.Message}";
+        }
+        
+        var hasBlockingProcesses = blockingProcesses.Any();
+        var hasCameras = cameraInfo.Any();
+        
+        string message;
+        if (hasBlockingProcesses)
+        {
+            message = $"Found {blockingProcesses.Count} Canon process(es) that may be blocking camera access. Close these processes before opening a session.";
+        }
+        else if (!hasCameras)
+        {
+            message = "No cameras detected. Ensure camera is: 1) Powered ON, 2) Connected via USB, 3) In P/Tv/Av/M mode (not scene or video mode), 4) USB drivers installed correctly.";
+        }
+        else
+        {
+            message = "No blocking Canon processes detected. If you're still getting error 0x7, the camera may be in an unsupported mode. CRITICAL: Verify camera mode dial is in P/Tv/Av/M position (NOT scene modes, video, or auto). Try: 1) Power cycle camera (OFF → wait 5s → ON), 2) Unplug/replug USB cable, 3) Ensure camera is not in playback/review mode, 4) Check camera menu for any PC connection settings.";
+        }
+        
+        return Results.Ok(new
+        {
+            BlockingProcesses = blockingProcesses,
+            HasBlockingProcesses = hasBlockingProcesses,
+            CameraConnectivity = cameraConnectivityStatus,
+            AvailableCameras = cameraInfo,
+            SessionOpen = sdkHandler.CameraSessionOpen,
+            Message = message
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Failed to check diagnostics: {ex.Message}");
+    }
+})
+.WithName("GetCameraDiagnostics")
+.WithOpenApi();
+
 app.MapGet("/api/printing/printers", (IPrintService svc) =>
 {
     return Results.Ok(new { Printers = svc.ListPrinters() });
@@ -91,7 +171,6 @@ app.MapGet("/api/printing/settings", (IOptions<PrintSettings> options) =>
 
 app.MapPut("/api/printing/settings", (PrintSettings input, IOptionsMonitor<PrintSettings> monitor, IServiceProvider sp) =>
 {
-    // Note: For simplicity we replace the singleton settings instance
     var field = typeof(OptionsMonitor<PrintSettings>).GetField("_currentValue", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
     if (field != null && monitor is OptionsMonitor<PrintSettings> mon)
     {
@@ -102,7 +181,6 @@ app.MapPut("/api/printing/settings", (PrintSettings input, IOptionsMonitor<Print
 
 app.MapPost("/api/printing/test", (IPrintService svc, IOptions<PrintSettings> opts) =>
 {
-    // Enqueue the most recent file from save directory (if any)
     var dir = opts.Value.SaveDirectory;
     if (!System.IO.Directory.Exists(dir)) return Results.BadRequest("Save directory does not exist");
     var file = new DirectoryInfo(dir).GetFiles("*.jpg").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault()
@@ -134,29 +212,77 @@ app.MapPost("/api/printing/reprint", (WindowsPrintService svc, string? path, IOp
     return Results.Ok(new { Message = "Reprint enqueued", File = target });
 }).WithName("Reprint").WithOpenApi();
 
-// Open session with a camera
-app.MapPost("/api/cameras/{cameraRef}/session", (IntPtr cameraRef, SDKHandler sdkHandler) =>
+app.MapPost("/api/cameras/session", async (string cameraRef, SDKHandler sdkHandler, ILogger<Program> logger) =>
 {
     try
     {
-        var cameras = sdkHandler.GetCameraList();
-        var camera = cameras.FirstOrDefault(c => c.Ref == cameraRef);
+        if (!IntPtr.TryParse(cameraRef, out var cameraRefPtr))
+            return Results.BadRequest("Invalid camera reference format.");
         
+        logger.LogInformation("Opening session for camera ref: {CameraRef}", cameraRef);
+        
+        if (sdkHandler.CameraSessionOpen)
+        {
+            logger.LogInformation("Closing existing session");
+            try { sdkHandler.CloseSession(); }
+            catch (Exception ex) { logger.LogWarning("Error closing session: {Error}", ex.Message); }
+            await Task.Delay(500);
+        }
+        var cameras = sdkHandler.GetCameraList();
+        var camera = cameras.FirstOrDefault(c => c.Ref == cameraRefPtr);
+
         if (camera == null)
             return Results.NotFound(LogConstants.CAMERA_NOT_FOUND);
 
         sdkHandler.OpenSession(camera);
-        return Results.Ok(new { Message = LogConstants.SESSION_OPENED_SUCCESSFULLY, CameraRef = cameraRef.ToString() });
+        return Results.Ok(new 
+        { 
+            Message = LogConstants.SESSION_OPENED_SUCCESSFULLY, 
+            CameraRef = cameraRef,
+            CameraName = camera.Info.szDeviceDescription,
+            PortName = camera.Info.szPortName
+        });
     }
     catch (Exception ex)
     {
-        return Results.Problem($"{LogConstants.FAILED_TO_OPEN_SESSION}: {ex.Message}");
+        logger.LogError(ex, "Failed to open session");
+        
+        var errorDetail = ex.Message;
+        var suggestions = new List<string>();
+        
+        if (ex.Message.Contains("SDK Error: 0x7"))
+        {
+            errorDetail += " | NOT_SUPPORTED - Camera refuses connection.";
+            suggestions.Add("Mode dial is in P/Tv/Av/M (physically verify)");
+            suggestions.Add("Exit playback mode (press shutter halfway)");
+            suggestions.Add("Close menu if open");
+            suggestions.Add("Power cycle camera (OFF -> wait 10s -> ON)");
+            suggestions.Add("Try Manual (M) mode instead of P");
+            suggestions.Add("Ensure camera is not busy/processing");
+            suggestions.Add("Check camera battery level");
+            suggestions.Add("Disable Wi‑Fi/Bluetooth/NFC on camera (USB remote control requires Wi‑Fi OFF)");
+            suggestions.Add("In camera menu, set USB connection to 'PC remote' or 'PC connection'");
+            suggestions.Add("Unplug and replug USB cable directly to PC (avoid hubs)");
+            suggestions.Add("Close any mobile/PC apps connected to the camera (Canon/third‑party)");
+        }
+        else if (ex.Message.Contains("SDK Error: 0xC0") || ex.Message.Contains("SDK Error: 0xc0"))
+        {
+            errorDetail += " | Port in use. Close Canon software, unplug USB, wait 10s, reconnect.";
+        }
+        else if (ex.Message.Contains("SDK Error: 0x201E") || ex.Message.Contains("SDK Error: 0x201e"))
+        {
+            errorDetail += " | Session already open. Call DELETE /api/cameras/session first.";
+        }
+        
+        return Results.Problem(
+            detail: $"{LogConstants.FAILED_TO_OPEN_SESSION}: {errorDetail}",
+            extensions: suggestions.Any() ? new Dictionary<string, object?> { ["suggestions"] = suggestions } : null
+        );
     }
 })
 .WithName("OpenSession")
 .WithOpenApi();
 
-// Close session
 app.MapDelete("/api/cameras/session", (SDKHandler sdkHandler) =>
 {
     try
@@ -172,7 +298,6 @@ app.MapDelete("/api/cameras/session", (SDKHandler sdkHandler) =>
 .WithName("CloseSession")
 .WithOpenApi();
 
-// Get camera settings
 app.MapGet("/api/cameras/settings/{propertyId}", (uint propertyId, SDKHandler sdkHandler) =>
 {
     try
@@ -191,7 +316,6 @@ app.MapGet("/api/cameras/settings/{propertyId}", (uint propertyId, SDKHandler sd
 .WithName("GetSetting")
 .WithOpenApi();
 
-// Set camera settings
 app.MapPost("/api/cameras/settings/{propertyId}", (uint propertyId, uint value, SDKHandler sdkHandler) =>
 {
     try
@@ -210,7 +334,6 @@ app.MapPost("/api/cameras/settings/{propertyId}", (uint propertyId, uint value, 
 .WithName("SetSetting")
 .WithOpenApi();
 
-// Get available settings list
 app.MapGet("/api/cameras/settings/{propertyId}/list", (uint propertyId, SDKHandler sdkHandler) =>
 {
     try
@@ -229,7 +352,6 @@ app.MapGet("/api/cameras/settings/{propertyId}/list", (uint propertyId, SDKHandl
 .WithName("GetSettingsList")
 .WithOpenApi();
 
-// Take a photo
 app.MapPost("/api/cameras/photo", (SDKHandler sdkHandler) =>
 {
     try
@@ -248,7 +370,6 @@ app.MapPost("/api/cameras/photo", (SDKHandler sdkHandler) =>
 .WithName("TakePhoto")
 .WithOpenApi();
 
-// Take a photo in bulb mode
 app.MapPost("/api/cameras/photo/bulb", (uint bulbTime, SDKHandler sdkHandler) =>
 {
     try
@@ -267,7 +388,6 @@ app.MapPost("/api/cameras/photo/bulb", (uint bulbTime, SDKHandler sdkHandler) =>
 .WithName("TakeBulbPhoto")
 .WithOpenApi();
 
-// Start live view
 app.MapPost("/api/cameras/liveview/start", (SDKHandler sdkHandler) =>
 {
     try
@@ -286,7 +406,6 @@ app.MapPost("/api/cameras/liveview/start", (SDKHandler sdkHandler) =>
 .WithName("StartLiveView")
 .WithOpenApi();
 
-// Stop live view
 app.MapPost("/api/cameras/liveview/stop", (bool lvOff, SDKHandler sdkHandler) =>
 {
     try
@@ -305,7 +424,6 @@ app.MapPost("/api/cameras/liveview/stop", (bool lvOff, SDKHandler sdkHandler) =>
 .WithName("StopLiveView")
 .WithOpenApi();
 
-// Start filming
 app.MapPost("/api/cameras/filming/start", (SDKHandler sdkHandler) =>
 {
     try
@@ -324,7 +442,6 @@ app.MapPost("/api/cameras/filming/start", (SDKHandler sdkHandler) =>
 .WithName("StartFilming")
 .WithOpenApi();
 
-// Stop filming
 app.MapPost("/api/cameras/filming/stop", (SDKHandler sdkHandler) =>
 {
     try
@@ -343,7 +460,6 @@ app.MapPost("/api/cameras/filming/stop", (SDKHandler sdkHandler) =>
 .WithName("StopFilming")
 .WithOpenApi();
 
-// Set focus
 app.MapPost("/api/cameras/focus", (uint speed, SDKHandler sdkHandler) =>
 {
     try
@@ -362,7 +478,6 @@ app.MapPost("/api/cameras/focus", (uint speed, SDKHandler sdkHandler) =>
 .WithName("SetFocus")
 .WithOpenApi();
 
-// Lock/Unlock camera UI
 app.MapPost("/api/cameras/ui/lock", (bool lockState, SDKHandler sdkHandler) =>
 {
     try
@@ -381,7 +496,6 @@ app.MapPost("/api/cameras/ui/lock", (bool lockState, SDKHandler sdkHandler) =>
 .WithName("SetUILock")
 .WithOpenApi();
 
-// Set capacity
 app.MapPost("/api/cameras/capacity", (int bytesPerSector, int numberOfFreeClusters, SDKHandler sdkHandler) =>
 {
     try
@@ -400,7 +514,6 @@ app.MapPost("/api/cameras/capacity", (int bytesPerSector, int numberOfFreeCluste
 .WithName("SetCapacity")
 .WithOpenApi();
 
-// Get camera status
 app.MapGet("/api/cameras/status", (SDKHandler sdkHandler) =>
 {
     try
@@ -421,7 +534,6 @@ app.MapGet("/api/cameras/status", (SDKHandler sdkHandler) =>
 .WithName("GetCameraStatus")
 .WithOpenApi();
 
-// Get all camera entries (files and folders)
 app.MapGet("/api/cameras/entries", (SDKHandler sdkHandler) =>
 {
     try
@@ -440,7 +552,6 @@ app.MapGet("/api/cameras/entries", (SDKHandler sdkHandler) =>
 .WithName("GetCameraEntries")
 .WithOpenApi();
 
-// Serialize CameraFileEntry
 object SerializeCameraFileEntry(CameraFileEntry entry)
 {
     return new

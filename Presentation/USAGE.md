@@ -46,7 +46,7 @@ The app initializes the Canon EDSDK once and exposes endpoints to control the ca
 2) Discover cameras:
    - GET `/api/cameras` → copy the `Ref` of your Canon R100.
 3) Open a session with the camera:
-   - POST `/api/cameras/{cameraRef}/session` (paste the `Ref`).
+   - POST `/api/cameras/session?cameraRef={Ref}` (paste the `Ref` as a query parameter).
 4) Optional checks/controls:
    - GET `/api/cameras/status` (session and camera name).
    - GET `/api/cameras/settings/{propertyId}` and `/list` to read available values.
@@ -77,7 +77,7 @@ Useful printing endpoints in Swagger:
 
 ### End‑to‑End Quick Start (Swagger)
 1) GET `/api/cameras` → copy `Ref`.
-2) POST `/api/cameras/{cameraRef}/session`.
+2) POST `/api/cameras/session?cameraRef={Ref}`.
 3) GET `/api/printing/printers` → confirm your `PrinterName` is listed.
 4) POST `/api/cameras/photo` → photo is saved and auto‑printed if enabled.
 5) GET `/api/printing/queue` → see queued/processed jobs.
@@ -85,6 +85,25 @@ Useful printing endpoints in Swagger:
 ### Troubleshooting
 - Camera not found: ensure R100 is on, connected via USB, and drivers are installed.
 - Session not open: call the session open endpoint before other operations.
+- **SDK Error 0xC0 (EDS_ERR_COMM_PORT_IS_IN_USE) when opening session**:
+  - **This is the most common error** - The USB port/camera communication is already in use
+  - **CRITICAL**: Canon EOS Utility **MUST** be completely closed (check Windows Task Manager)
+  - **Steps to fix**:
+    1. Open Task Manager (Ctrl+Shift+Esc)
+    2. End all Canon processes: `EOS Utility`, `CameraWindow`, `Canon Camera Connect`, etc.
+    3. Unplug the camera USB cable
+    4. Wait 10 seconds
+    5. Plug USB cable back in
+    6. Call GET `/api/cameras` to get a fresh camera list
+    7. Try opening session again with the new camera reference
+  - If still failing: Restart your computer to fully release the USB port
+- **SDK Error 0x7 (EDS_ERR_NOT_SUPPORTED) when opening session**:
+  - **Most common**: Ensure Canon EOS Utility or any other Canon software is **completely closed**. The EDSDK can only connect to one application at a time.
+  - **Camera mode**: Make sure the camera is in a supported mode (P, Tv, Av, M). Some scene modes or video mode may not support PC control.
+  - **Camera settings**: Try turning the camera mode dial to ensure it's not stuck. Turn the camera off and on again.
+  - **USB connection**: Try unplugging and replugging the USB cable. Use a high-quality USB cable directly connected to the PC (avoid USB hubs if possible).
+  - **Drivers**: Reinstall Canon drivers or EOS Utility to ensure proper USB drivers are installed.
+  - **Get fresh camera list**: Call GET `/api/cameras` again to get a new camera reference before attempting to open the session.
 - Printer not found/invalid: confirm the exact Windows queue name in `PrinterName`, and that a Windows test page prints successfully.
 - No auto‑print: ensure `Enabled=true`, `AutoPrint=true`, and that `SaveDirectory` exists (the app also tries to create it at startup).
 

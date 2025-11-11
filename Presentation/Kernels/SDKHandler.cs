@@ -1,15 +1,8 @@
-﻿using System;
-using System.IO;
-using System.Linq;
+﻿using Presentation.Kernels;
 using System.Drawing;
-using System.Threading;
-using System.Globalization;
 using System.Drawing.Imaging;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
-
 using static Presentation.PInvoke.EDSDK;
-using Presentation.Constants;
 
 namespace Presentation.Kernels
 {
@@ -70,7 +63,7 @@ namespace Presentation.Kernels
             {
                 if (value != EDS_ERR_OK)
                 {
-                    throw new Exception(LogConstants.SDK_ERROR_PREFIX + value.ToString("X"));
+                    throw new Exception("SDK Error: 0x" + value.ToString("X"));
                 }
             }
         }
@@ -113,6 +106,7 @@ namespace Presentation.Kernels
         public delegate void ProgressHandler(int Progress);
         public delegate void StreamUpdate(Stream img);
         public delegate void BitmapUpdate(Bitmap bmp);
+        public delegate void PhotoSavedHandler(string filePath);
 
         /// <summary>
         /// Fires if a camera is added
@@ -134,7 +128,10 @@ namespace Presentation.Kernels
         /// If an image is downloaded, this event fires with the downloaded image.
         /// </summary>
         public event BitmapUpdate ImageDownloaded;
-        public event Action<string> PhotoSaved;
+        /// <summary>
+        /// Fires when a photo is successfully saved to disk
+        /// </summary>
+        public event PhotoSavedHandler PhotoSaved;
 
         #endregion
 
@@ -203,13 +200,6 @@ namespace Presentation.Kernels
                 EdsSetObjectEventHandler(MainCamera.Ref, ObjectEvent_All, SDKObjectEvent, MainCamera.Ref);
                 EdsSetPropertyEventHandler(MainCamera.Ref, PropertyEvent_All, SDKPropertyEvent, MainCamera.Ref);
                 CameraSessionOpen = true;
-                // ensure images save to host and camera has capacity
-                try
-                {
-                    SetSetting(PropID_SaveTo, (uint)EdsSaveTo.Host);
-                    SetCapacity();
-                }
-                catch { /* ignore if camera not ready yet */ }
             }
         }
 
@@ -218,13 +208,13 @@ namespace Presentation.Kernels
         /// </summary>
         public void CloseSession()
         {
-            if (CameraSessionOpen && MainCamera != null)
+            if (CameraSessionOpen)
             {
                 //if live view is still on, stop it and wait till the thread has stopped
                 if (IsLiveViewOn)
                 {
                     StopLiveView();
-                    LVThread?.Join(1000);
+                    LVThread.Join(1000);
                 }
 
                 //Remove the event handler
@@ -563,11 +553,7 @@ namespace Presentation.Kernels
                     break;
                 case StateEvent_Shutdown:
                     CameraSessionOpen = false;
-                    if (LVThread?.IsAlive == true) 
-                    {
-                        LVThread.Interrupt();
-                        LVThread.Join(1000); // Wait up to 1 second for thread to finish
-                    }
+                    if (LVThread.IsAlive) LVThread.Abort();
                     if (CameraHasShutdown != null) CameraHasShutdown(this, new EventArgs());
                     break;
                 case StateEvent_ShutDownTimerUpdate:
@@ -605,8 +591,8 @@ namespace Presentation.Kernels
                 lock (STAThread.ExecLock) { DownloadData(ObjectPointer, streamRef); }
                 //release stream
                 Error = EdsRelease(streamRef);
-                // notify
-                try { PhotoSaved?.Invoke(CurrentPhoto); } catch { }
+                //fire the PhotoSaved event with the file path
+                if (PhotoSaved != null) PhotoSaved(CurrentPhoto);
             }, true);
         }
 
@@ -794,9 +780,9 @@ namespace Presentation.Kernels
                     Error = EdsGetPropertyDesc(MainCamera.Ref, PropID, out des);
                     return des.PropDesc.Take(des.NumElements).ToList();
                 }
-                else throw new ArgumentException(LogConstants.METHOD_CANNOT_BE_USED_WITH_PROPERTY_ID);
+                else throw new ArgumentException("Method cannot be used with this Property ID");
             }
-            else { throw new ArgumentNullException(LogConstants.CAMERA_OR_REFERENCE_NULL); }
+            else { throw new ArgumentNullException("Camera or camera reference is null/zero"); }
         }
 
         /// <summary>
@@ -812,7 +798,7 @@ namespace Presentation.Kernels
                 Error = EdsGetPropertyData(MainCamera.Ref, PropID, 0, out property);
                 return property;
             }
-            else { throw new ArgumentNullException(LogConstants.CAMERA_OR_REFERENCE_NULL); }
+            else { throw new ArgumentNullException("Camera or camera reference is null/zero"); }
         }
 
         /// <summary>
@@ -828,7 +814,7 @@ namespace Presentation.Kernels
                 EdsGetPropertyData(MainCamera.Ref, PropID, 0, out data);
                 return data;
             }
-            else { throw new ArgumentNullException(LogConstants.CAMERA_OR_REFERENCE_NULL); }
+            else { throw new ArgumentNullException("Camera or camera reference is null/zero"); }
         }
 
         /// <summary>
@@ -866,7 +852,7 @@ namespace Presentation.Kernels
                     }
                 }
             }
-            else { throw new ArgumentNullException(LogConstants.CAMERA_OR_REFERENCE_NULL); }
+            else { throw new ArgumentNullException("Camera or camera reference is null/zero"); }
         }
 
         #endregion
@@ -888,11 +874,12 @@ namespace Presentation.Kernels
                     EdsDataType proptype;
                     //get size of property
                     Error = EdsGetPropertySize(MainCamera.Ref, PropID, 0, out proptype, out propsize);
-                    //set given property
-                    IntPtr ptr = Marshal.AllocHGlobal(propsize);
+                    // marshal uint to unmanaged memory
+                    IntPtr ptr = Marshal.AllocHGlobal(Math.Max(propsize, Marshal.SizeOf(typeof(uint))));
                     try
                     {
-                        Marshal.WriteInt32(ptr, (int)Value);
+                        Marshal.StructureToPtr(Value, ptr, false);
+                        //set given property
                         Error = EdsSetPropertyData(MainCamera.Ref, PropID, 0, propsize, ptr);
                     }
                     finally
@@ -901,7 +888,7 @@ namespace Presentation.Kernels
                     }
                 });
             }
-            else { throw new ArgumentNullException(LogConstants.CAMERA_OR_REFERENCE_NULL); }
+            else { throw new ArgumentNullException("Camera or camera reference is null/zero"); }
         }
 
         /// <summary>
@@ -913,21 +900,24 @@ namespace Presentation.Kernels
         {
             if (MainCamera.Ref != IntPtr.Zero)
             {
-                if (Value == null) throw new ArgumentNullException(LogConstants.STRING_MUST_NOT_BE_NULL);
+                if (Value == null) throw new ArgumentNullException("String must not be null");
 
                 //convert string to byte array
                 byte[] propertyValueBytes = System.Text.Encoding.ASCII.GetBytes(Value + '\0');
                 int propertySize = propertyValueBytes.Length;
 
                 //check size of string
-                if (propertySize > 32) throw new ArgumentOutOfRangeException(LogConstants.VALUE_TOO_LARGE);
+                if (propertySize > 32) throw new ArgumentOutOfRangeException("Value must be smaller than 32 bytes");
 
                 //set value
-                SendSDKCommand(delegate 
-                { 
+                SendSDKCommand(delegate
+                {
                     IntPtr ptr = Marshal.AllocHGlobal(32);
                     try
                     {
+                        // zero buffer then copy bytes
+                        Span<byte> zero = stackalloc byte[32];
+                        Marshal.Copy(zero.ToArray(), 0, ptr, 32);
                         Marshal.Copy(propertyValueBytes, 0, ptr, propertyValueBytes.Length);
                         Error = EdsSetPropertyData(MainCamera.Ref, PropID, 0, 32, ptr);
                     }
@@ -937,7 +927,7 @@ namespace Presentation.Kernels
                     }
                 });
             }
-            else { throw new ArgumentNullException(LogConstants.CAMERA_OR_REFERENCE_NULL); }
+            else { throw new ArgumentNullException("Camera or camera reference is null/zero"); }
         }
 
         /// <summary>
@@ -949,8 +939,8 @@ namespace Presentation.Kernels
         {
             if (MainCamera.Ref != IntPtr.Zero)
             {
-                SendSDKCommand(delegate 
-                { 
+                SendSDKCommand(delegate
+                {
                     int size = Marshal.SizeOf(typeof(T));
                     IntPtr ptr = Marshal.AllocHGlobal(size);
                     try
@@ -964,7 +954,7 @@ namespace Presentation.Kernels
                     }
                 });
             }
-            else { throw new ArgumentNullException(LogConstants.CAMERA_OR_REFERENCE_NULL); }
+            else { throw new ArgumentNullException("Camera or camera reference is null/zero"); }
         }
 
         #endregion
@@ -1129,7 +1119,7 @@ namespace Presentation.Kernels
             if (!IsFilming)
             {
                 //Check if the camera is ready to film
-                if (GetSetting(PropID_Record) != 3) throw new InvalidOperationException(LogConstants.CAMERA_NOT_IN_FILM_MODE);
+                if (GetSetting(PropID_Record) != 3) throw new InvalidOperationException("Camera is not in film mode");
 
                 IsFilming = true;
 
@@ -1139,19 +1129,7 @@ namespace Presentation.Kernels
                 SetSetting(PropID_SaveTo, (uint)EdsSaveTo.Camera);
                 this.DownloadVideo = false;
                 //start the video recording
-                SendSDKCommand(delegate 
-                { 
-                    IntPtr ptr = Marshal.AllocHGlobal(4);
-                    try
-                    {
-                        Marshal.WriteInt32(ptr, 4);
-                        Error = EdsSetPropertyData(MainCamera.Ref, PropID_Record, 0, 4, ptr);
-                    }
-                    finally
-                    {
-                        Marshal.FreeHGlobal(ptr);
-                    }
-                });
+                SendSDKCommand(delegate { Error = EdsSetPropertyData(MainCamera.Ref, PropID_Record, 0, 4, 4); });
             }
         }
 
@@ -1167,16 +1145,7 @@ namespace Presentation.Kernels
                     //Shut off live view (it will hang otherwise)
                     StopLiveView(false);
                     //stop video recording
-                    IntPtr ptr = Marshal.AllocHGlobal(4);
-                    try
-                    {
-                        Marshal.WriteInt32(ptr, 0);
-                        Error = EdsSetPropertyData(MainCamera.Ref, PropID_Record, 0, 4, ptr);
-                    }
-                    finally
-                    {
-                        Marshal.FreeHGlobal(ptr);
-                    }
+                    Error = EdsSetPropertyData(MainCamera.Ref, PropID_Record, 0, 4, 0);
                 });
                 //set back to previous state
                 SetSetting(PropID_SaveTo, PrevSaveTo);
@@ -1198,7 +1167,8 @@ namespace Presentation.Kernels
             SendSDKCommand(delegate
             {
                 //send command to camera
-                lock (STAThread.ExecLock) { Error = EdsSendCommand(MainCamera.Ref, CameraCommand_PressShutterButton, (int)state); };
+                lock (STAThread.ExecLock) { Error = EdsSendCommand(MainCamera.Ref, CameraCommand_PressShutterButton, (int)state); }
+                ;
             }, true);
         }
 
@@ -1211,7 +1181,8 @@ namespace Presentation.Kernels
             SendSDKCommand(delegate
             {
                 //send command to camera
-                lock (STAThread.ExecLock) { Error = EdsSendCommand(MainCamera.Ref, CameraCommand_TakePicture, 0); };
+                lock (STAThread.ExecLock) { Error = EdsSendCommand(MainCamera.Ref, CameraCommand_TakePicture, 0); }
+                ;
             }, true);
         }
 
@@ -1222,7 +1193,7 @@ namespace Presentation.Kernels
         public void TakePhoto(uint BulbTime)
         {
             //bulbtime has to be at least a second
-            if (BulbTime < 1000) { throw new ArgumentException(LogConstants.BULBTIME_TOO_SMALL); }
+            if (BulbTime < 1000) { throw new ArgumentException("Bulbtime has to be bigger than 1000ms"); }
 
             //start thread to not block everything
             SendSDKCommand(delegate
@@ -1320,7 +1291,7 @@ namespace Presentation.Kernels
         public CameraFileEntry GetAllEntries()
         {
             //create the main entry which contains all subentries
-            CameraFileEntry MainEntry = new CameraFileEntry(LogConstants.CAMERA, true);
+            CameraFileEntry MainEntry = new CameraFileEntry("Camera", true);
 
             //get the number of volumes currently installed in the camera
             int VolumeCount;
@@ -1337,10 +1308,10 @@ namespace Presentation.Kernels
                 SendSDKCommand(delegate { Error = EdsGetVolumeInfo(ChildPtr, out vinfo); });
 
                 //ignore the HDD
-                if (vinfo.szVolumeLabel != LogConstants.HDD)
+                if (vinfo.szVolumeLabel != "HDD")
                 {
                     //add volume to the list
-                    VolumeEntries.Add(new CameraFileEntry(string.Format(LogConstants.VOLUME_FORMAT, i, vinfo.szVolumeLabel), true));
+                    VolumeEntries.Add(new CameraFileEntry("Volume" + i + "(" + vinfo.szVolumeLabel + ")", true));
                     //get all child entries on this volume
                     VolumeEntries[i].AddSubEntries(GetChildren(ChildPtr));
                 }
